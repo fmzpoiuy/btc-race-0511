@@ -41,7 +41,7 @@ import { runBars, type BarsState, type Batch, type OrderInput } from './vendor/m
 const SYMBOL = 'CBBTC';
 const DEV_T0_MS = 1795324320000;
 const SLIP = 10000;
-const RACE_FROM = 1400;      // dust buys only here, after the trend-entry window closes
+const RACE_FROM = 1400;      // first seq a dust buy may fire - entry legs stay armed to 1430, but dust only fires while nothing has filled
 const DUST = '1234567';      // $1.234567: an off-round notional no plain dust clone shares
 const MOM_N = 240;
 const MOM240_NUM = 10250n;   // require +2.5% over the last 240 closes
