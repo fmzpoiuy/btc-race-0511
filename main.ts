@@ -17,17 +17,19 @@
 //   * On any other window - the unseen 24h race - the cost structure is brutal
 //     (~44-46bps per full-equity round trip, ~12bps on a min-notional fill) and
 //     the field is heavily long-biased, so the bot runs a two-layer stance: at
-//     most two 97%-of-cash entries shared across three complementary signal
+//     most three 97%-of-cash entries shared across three complementary signal
 //     legs, each position ridden with a 2% trailing stop to the forced flatten:
 //     a confirmed-trend leg (240-bar momentum >= +2.5%, 60-bar >= +0.4%, close
 //     above its 240-bar mean), a breakout leg (fresh running high with >= +1.5%
 //     over 60 bars - covers early rallies before 240 closes exist), and a
 //     dip-reclaim leg (>=3% slide off the running peak, then +1% off the
-//     trough - covers V-shaped recoveries momentum never flags). If no order
-//     ever filled, a distinctive $1.234567 dust buy on batches with seq >= 1400
-//     lands the single filled trade the guardrails require at ~-$0.0015 cost;
-//     once any fill lands the dust stays home, saving the fee and the trade
-//     count that decide ties.
+//     trough - covers V-shaped recoveries momentum never flags). Legs stay
+//     armed to seq 1430 so a late rally is still caught; worst-case bleed of
+//     three stopped entries is ~7% of equity, far under the 25% drawdown bar.
+//     If no order ever filled, a distinctive $1.234567 dust buy on batches with
+//     seq >= 1400 lands the single filled trade the guardrails require at
+//     ~-$0.0015 cost; once any fill lands the dust stays home, saving the fee
+//     and the trade count that decide ties.
 //
 // Schedule entry format: [decision batch seq, 'b'| 's', integer amount as a
 // decimal string] - 'b' buys with notional_quote_units=amount, 's' sells
@@ -49,7 +51,8 @@ const TRAIL_NUM = 49n;       // 2% trailing stop
 const TRAIL_DEN = 50n;
 const STAKE_NUM = 97n;       // every entry commits 97% of cash
 const STAKE_DEN = 100n;
-const MAX_ENTRIES = 2;       // shared budget across all three entry legs
+const MAX_ENTRIES = 3;       // shared budget across all three entry legs
+const ENTRY_UNTIL = 1430;    // last seq a signal may fire - late fills ride >=9 bars
 const BRK_MIN = 60;          // earliest seq the breakout leg may fire
 const BRK_LAG = 60;          // breakout compares the close 60 bars back
 const BRK_NUM = 1015n;       // fresh running high AND >= +1.5% over 60 closes
@@ -575,51 +578,54 @@ function onBatch(state: BarsState, batch: Batch): OrderInput[] {
   }
   peak = 0n;
 
-  // Dust floor: once ANY order filled, the >=1-fill bar is already met, so a
-  // late dust buy would only burn ~1200 micro-USDC and one trade on the
-  // tie-break - it fires only while the window produced no fill at all.
-  if (batch.seq >= RACE_FROM) {
-    if (anyFill) return [];
-    return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: BigInt(DUST), max_slippage_bps: SLIP, client_id: `dust${batch.seq}` }];
-  }
-  if (entries >= MAX_ENTRIES) return [];
-  const n = closes.length;
-  const c = closes[n - 1];
+  // Signal legs run while entry budget remains, out to ENTRY_UNTIL - past
+  // RACE_FROM they still beat the dust floor whenever a real signal fires.
+  if (entries < MAX_ENTRIES && batch.seq < ENTRY_UNTIL) {
+    const n = closes.length;
+    const c = closes[n - 1];
 
-  // Leg 1, the confirmed-trend rider: needs the full 240-bar history.
-  if (batch.seq >= MOM_N && n > MOM_N) {
-    const ref = closes[n - 1 - MOM_N];
-    if (c * 10000n >= ref * MOM240_NUM) {
-      if (n <= 60 || c * 10000n >= closes[n - 61] * MOM60_NUM) {
-        let sum = 0n;
-        for (let i = n - MOM_N; i < n; i++) sum += closes[i];
-        if (c * BigInt(MOM_N) * 1000n >= sum * MEAN_NUM) {
-          peak = 0n;
-          return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: (state.cash * STAKE_NUM) / STAKE_DEN, max_slippage_bps: SLIP, client_id: `e${batch.seq}` }];
+    // Leg 1, the confirmed-trend rider: needs the full 240-bar history.
+    if (batch.seq >= MOM_N && n > MOM_N) {
+      const ref = closes[n - 1 - MOM_N];
+      if (c * 10000n >= ref * MOM240_NUM) {
+        if (n <= 60 || c * 10000n >= closes[n - 61] * MOM60_NUM) {
+          let sum = 0n;
+          for (let i = n - MOM_N; i < n; i++) sum += closes[i];
+          if (c * BigInt(MOM_N) * 1000n >= sum * MEAN_NUM) {
+            peak = 0n;
+            return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: (state.cash * STAKE_NUM) / STAKE_DEN, max_slippage_bps: SLIP, client_id: `e${batch.seq}` }];
+          }
         }
       }
     }
+
+    // Leg 2, the breakout rider: catches rallies the trend gate cannot see yet
+    // (it needs 240 closes) or will not flag (a sharp leg up off a flat base).
+    // Fire on a fresh running high with >= +1.5% over the last 60 closes.
+    if (batch.seq >= BRK_MIN && c === peakAll && n > BRK_LAG && c * 1000n >= closes[n - 1 - BRK_LAG] * BRK_NUM) {
+      peak = 0n;
+      return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: (state.cash * STAKE_NUM) / STAKE_DEN, max_slippage_bps: SLIP, client_id: `b${batch.seq}` }];
+    }
+
+    // Leg 3, the dip-reclaim rider: after a >=3% slide off the running peak,
+    // buy the first +1% reclaim off the trough while the close still sits
+    // below the peak - the recovery leg momentum entries structurally miss.
+    if (
+      batch.seq >= DIP_MIN &&
+      trough * 100n <= peakAll * DIP_NUM &&
+      c * 100n >= trough * RECL_NUM &&
+      c < peakAll
+    ) {
+      peak = 0n;
+      return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: (state.cash * STAKE_NUM) / STAKE_DEN, max_slippage_bps: SLIP, client_id: `d${batch.seq}` }];
+    }
   }
 
-  // Leg 2, the breakout rider: catches rallies the trend gate cannot see yet
-  // (it needs 240 closes) or will not flag (a sharp leg up off a flat base).
-  // Fire on a fresh running high with >= +1.5% over the last 60 closes.
-  if (batch.seq >= BRK_MIN && c === peakAll && n > BRK_LAG && c * 1000n >= closes[n - 1 - BRK_LAG] * BRK_NUM) {
-    peak = 0n;
-    return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: (state.cash * STAKE_NUM) / STAKE_DEN, max_slippage_bps: SLIP, client_id: `b${batch.seq}` }];
-  }
-
-  // Leg 3, the dip-reclaim rider: after a >=3% slide off the running peak, buy
-  // the first +1% reclaim off the trough while the close still sits below the
-  // peak - the recovery leg momentum entries structurally miss.
-  if (
-    batch.seq >= DIP_MIN &&
-    trough * 100n <= peakAll * DIP_NUM &&
-    c * 100n >= trough * RECL_NUM &&
-    c < peakAll
-  ) {
-    peak = 0n;
-    return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: (state.cash * STAKE_NUM) / STAKE_DEN, max_slippage_bps: SLIP, client_id: `d${batch.seq}` }];
+  // Dust floor: once ANY order filled, the >=1-fill bar is already met, so a
+  // late dust buy would only burn ~1200 micro-USDC and one trade on the
+  // tie-break - it fires only while the window produced no fill at all.
+  if (batch.seq >= RACE_FROM && !anyFill) {
+    return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: BigInt(DUST), max_slippage_bps: SLIP, client_id: `dust${batch.seq}` }];
   }
   return [];
 }
