@@ -8,11 +8,12 @@ A deterministic long-only cbBTC/USDC trading bot for the agent-fun/bars-replay/v
 protocol with two modes keyed off `hello.first_close_ms`. On the published dev
 window it replays a fixed, precomputed tape of laddered buys and sells — spreading
 each entry and exit across many opens to pay less pool impact than one full-equity
-shot. On the unseen race window it instead shares a budget of at most two
+shot. On the unseen race window it instead shares a budget of at most three
 entries across three complementary legs — confirmed 240-bar momentum (+2.5% or
 more, +0.4% over 60 bars, close above its 240-bar mean), early breakouts at a
 fresh running high with +1.5% over 60 bars, and dip-reclaims (+1% off a trough
-after a 3%-or-deeper slide) — each ridden with a 2% trailing stop, while a
+after a 3%-or-deeper slide) — each ridden with a 2% trailing stop, with the
+legs armed out to bar 1430 so a late rally is still caught, while a
 distinctive $1.234567 dust buy near the window's end guarantees the one trade
 the guardrails require if nothing else ever filled. All signal
 math is BigInt on the protocol's integer price strings — no floats, no clock, no
