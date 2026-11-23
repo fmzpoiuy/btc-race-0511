@@ -43,7 +43,7 @@ const closes: (bigint | undefined)[] = [];
 let peak = 0n;
 /** Seq of the batch the last exit was decided on; -1 before any exit. */
 let lastExitSeq = -1;
-/** Momentum re-entries sent so far (the batch-0 entry is not counted). */
+/** Re-entries filled so far, counted at their fill (the batch-0 entry is not one). */
 let reEntries = 0;
 
 function onBatch(state: BarsState, batch: Batch): OrderInput[] {
@@ -65,14 +65,17 @@ function onBatch(state: BarsState, batch: Batch): OrderInput[] {
       enter = ref !== undefined && close !== null && close * MOMO_DEN > ref * MOMO_NUM;
     }
     if (!enter || stake < minNotional) return [];
-    if (batch.seq !== 0) reEntries++;
     return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: stake, max_slippage_bps: MAX_SLIPPAGE_BPS }];
   }
 
-  // Holding: a buy fill reported on this batch resets the peak; every close since
-  // feeds it, and a close 2% under it exits the whole position.
+  // Holding: a buy fill reported on this batch resets the peak — and counts toward
+  // the re-entry bound when it is one (decided after batch 0), so a re-entry the
+  // market refuses costs nothing and can retry while the gate still holds.
   for (const f of batch.fills) {
-    if (f.symbol === SYMBOL && f.side === 'buy' && f.status === 'filled') peak = 0n;
+    if (f.symbol === SYMBOL && f.side === 'buy' && f.status === 'filled') {
+      peak = 0n;
+      if (f.decided_bar > 0) reEntries++;
+    }
   }
   if (close === null) return [];
   if (close > peak) peak = close;
